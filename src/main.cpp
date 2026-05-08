@@ -587,7 +587,10 @@ void runAgent () {
             cur_time += 1.0_rt; // time step is one day
 
             // early exit if no more spreading or deaths can occur
-            if (num_infected[0] == 0) { break; }
+            if (num_infected[0] == 0) {
+              Print() << "EARLY-EXIT: num_infected==0" << std::endl;
+              break;
+            }
         }
     }
 
