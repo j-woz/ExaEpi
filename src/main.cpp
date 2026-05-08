@@ -47,6 +47,11 @@ void overrideAmrexDefaults () {
 int main (int argc, /*!< Number of command line arguments */
           char* argv[] /*!< Command line arguments */) {
 
+
+  // std::cout << "Starting ExaEpi ..." << std::endl;
+
+  // std::cout << "MPI_Init ..." << std::endl;
+
     int my_rank;
 #ifdef AMREX_USE_MPI
     MPI_Init(&argc, &argv);
@@ -54,6 +59,8 @@ int main (int argc, /*!< Number of command line arguments */
 #else
     my_rank = 0;
 #endif
+
+    // std::cout << "MPI_Init ok ." << std::endl;
 
     if (argc < 2) {
         if (my_rank == 0) {
@@ -79,6 +86,8 @@ int main (int argc, /*!< Number of command line arguments */
     }
 
     amrex::Initialize(argc, argv, true, MPI_COMM_WORLD, overrideAmrexDefaults);
+
+    // std::cout << "amrex ok ." << std::endl;
 
     Print() << "ExaEpi version " << EXAEPI_VERSION << " (built on " << __DATE__ << ")\n";
 
@@ -149,6 +158,8 @@ void runAgent () {
     for (int d = 0; d < params.num_diseases; d++) {
         amrex::Print() << "    " << params.disease_names[d] << "\n";
     }
+
+    auto start_setup = std::chrono::high_resolution_clock::now();
 
     Geometry geom;
     BoxArray ba;
@@ -381,6 +392,11 @@ void runAgent () {
         }
     }
 
+    auto stop_setup = std::chrono::high_resolution_clock::now();
+    std::chrono::duration<double> setup_time = stop_setup - start_setup;
+    Print() << "TIME: SETUP: " << std::fixed << std::setprecision(2) << setup_time.count() << std::endl;
+
+    auto start_sim = std::chrono::high_resolution_clock::now();
     {
         BL_PROFILE_REGION("Evolution");
         for (int i = start_day; i < params.nsteps; ++i) {
@@ -559,7 +575,7 @@ void runAgent () {
 
             std::chrono::duration<double> elapsed_time = std::chrono::high_resolution_clock::now() - start_time;
 
-            Print() << "[Day " << cur_time << " " << std::fixed << std::setprecision(1) << elapsed_time.count()
+            Print() << "[Day " << cur_time << " " << std::fixed << std::setprecision(2) << elapsed_time.count()
                     << "s] infected: ";
             for (int d = 0; d < params.num_diseases; d++) {
                 if (d > 0) { Print() << ", "; }
@@ -574,6 +590,10 @@ void runAgent () {
             if (num_infected[0] == 0) { break; }
         }
     }
+
+    auto stop_sim = std::chrono::high_resolution_clock::now();
+    std::chrono::duration<double> sim_time = stop_sim - start_sim;
+    Print() << "TIME: SIM: " << std::fixed << std::setprecision(2) << sim_time.count() << std::endl;
 
     if (params.num_diseases == 1) {
         amrex::Print() << "\n \n";
