@@ -21,6 +21,7 @@
 #include "WeatherData.H"
 
 #include "version.h"
+#include "TimingUtils.H"
 
 using namespace amrex;
 using namespace ExaEpi;
@@ -47,6 +48,11 @@ void overrideAmrexDefaults () {
 int main (int argc, /*!< Number of command line arguments */
           char* argv[] /*!< Command line arguments */) {
 
+
+  // std::cout << "Starting ExaEpi ..." << std::endl;
+
+  // std::cout << "MPI_Init ..." << std::endl;
+
     int my_rank;
 #ifdef AMREX_USE_MPI
     MPI_Init(&argc, &argv);
@@ -54,6 +60,8 @@ int main (int argc, /*!< Number of command line arguments */
 #else
     my_rank = 0;
 #endif
+
+    // std::cout << "MPI_Init ok ." << std::endl;
 
     if (argc < 2) {
         if (my_rank == 0) {
@@ -79,6 +87,8 @@ int main (int argc, /*!< Number of command line arguments */
     }
 
     amrex::Initialize(argc, argv, true, MPI_COMM_WORLD, overrideAmrexDefaults);
+
+    // std::cout << "amrex ok ." << std::endl;
 
     Print() << "ExaEpi version " << EXAEPI_VERSION << " (built on " << __DATE__ << ")\n";
 
@@ -150,31 +160,45 @@ void runAgent () {
         amrex::Print() << "    " << params.disease_names[d] << "\n";
     }
 
+    auto start_setup = std::chrono::high_resolution_clock::now();
+
     Geometry geom;
     BoxArray ba;
     DistributionMapping dm;
     CensusData censusData;
     UrbanPopData urbanPopData;
 
+    auto t0 = std::chrono::high_resolution_clock::now();
     if (params.ic_type == ICType::Census) {
         censusData.init(params, geom, ba, dm);
     } else if (params.ic_type == ICType::UrbanPop) {
         urbanPopData.init(params, geom, ba, dm);
     }
+    auto t1 = std::chrono::high_resolution_clock::now();
+    reportTiming("init_geom", t0, t1);
 
     AirTravelFlow air;
     if (params.air_travel_int > 0) {
+        auto t_air_start = std::chrono::high_resolution_clock::now();
         air.readAirports(params.airports_filename, censusData.demo);
         air.readAirTravelFlow(params.air_traffic_filename);
         air.computeTravelProbs(censusData.demo);
+        auto t_air_end = std::chrono::high_resolution_clock::now();
+        reportTiming("init_air_travel", t_air_start, t_air_end);
     }
 
     WeatherData wd;
-    if (params.weather_int > 0) { wd.readDataFromFile(params.weather_filename); }
+    if (params.weather_int > 0) {
+        auto t_weather_start = std::chrono::high_resolution_clock::now();
+        wd.readDataFromFile(params.weather_filename);
+        auto t_weather_end = std::chrono::high_resolution_clock::now();
+        reportTiming("init_weather", t_weather_start, t_weather_end);
+    }
 
     // The default output filename is:
     // output.dat for a single disease
     // output_<disease_name>.dat for multiple diseases
+    auto t_output_start = std::chrono::high_resolution_clock::now();
     std::vector<std::string> output_filename;
     output_filename.resize(params.num_diseases);
     if (params.num_diseases == 1) {
@@ -215,7 +239,10 @@ void runAgent () {
             }
         }
     }
+    auto t_output_end = std::chrono::high_resolution_clock::now();
+    reportTiming("init_output_files", t_output_start, t_output_end);
 
+    auto t_multifab_start = std::chrono::high_resolution_clock::now();
     amrex::Vector<std::unique_ptr<MultiFab>> disease_stats;
     disease_stats.resize(params.num_diseases);
     for (int d = 0; d < params.num_diseases; d++) {
@@ -230,20 +257,28 @@ void runAgent () {
     bool stable_redistribute = !params.fast;
     pc.setStableRedistribute(stable_redistribute);
     pc.setTileSize(censusData.unit_mf.mfiter_tile_size);
+    auto t_multifab_end = std::chrono::high_resolution_clock::now();
+    reportTiming("init_multifabs", t_multifab_start, t_multifab_end);
 
     amrex::Real cur_time = 0;
     int start_day = 0;
     {
         BL_PROFILE_REGION("Initialization");
+        auto t_agent_init_start = std::chrono::high_resolution_clock::now();
         if (params.restart_chkfile.empty()) {
             if (params.ic_type == ICType::Census) {
+              amrex::Print() << "CENSUS!\n";
                 censusData.initAgents(pc, params.nborhood_size);
                 censusData.readWorkerflow(pc, params.workerflow_filename, params.workgroup_size);
             } else if (params.ic_type == ICType::UrbanPop) {
+                amrex::Print() << "URBANPOP!\n";
                 urbanPopData.initAgents(pc, params);
             } else {
                 Abort("Unimplemented ic_type");
             }
+            exit(0);
+            auto t_agent_init_end = std::chrono::high_resolution_clock::now();
+            reportTiming("init_agents", t_agent_init_start, t_agent_init_end);
 
 #ifdef AMREX_DEBUG
             //  dump a text file of the initial agent fields for debugging purposes
@@ -262,6 +297,7 @@ void runAgent () {
             }
 #endif
 
+            auto t_cases_start = std::chrono::high_resolution_clock::now();
             for (int d = 0; d < params.num_diseases; d++) {
                 auto disease_params = pc.getDiseaseParameters_h(d);
                 if (disease_params->initial_case_type == CaseTypes::file) {
@@ -281,14 +317,20 @@ void runAgent () {
                                           params.fast);
                 }
             }
+            auto t_cases_end = std::chrono::high_resolution_clock::now();
+            reportTiming("init_cases", t_cases_start, t_cases_end);
 
             pc.printStudentTeacherCounts();
             pc.printAgeGroupCounts();
 
             if (params.ic_type == ICType::Census && params.air_travel_int > 0) {
+                auto t_agent_air_start = std::chrono::high_resolution_clock::now();
                 pc.setAirTravel(censusData.unit_mf, air, censusData.demo);
+                auto t_agent_air_end = std::chrono::high_resolution_clock::now();
+                reportTiming("init_agent_air_travel", t_agent_air_start, t_agent_air_end);
             }
         } else {
+            auto t_checkpoint_start = std::chrono::high_resolution_clock::now();
             if (params.ic_type == ICType::Census) {
                 IO::readCheckpointFile(params.restart_chkfile, pc, disease_stats, &(censusData.unit_mf), &(censusData.FIPS_mf),
                                        &(censusData.comm_mf), cur_time, start_day);
@@ -296,11 +338,14 @@ void runAgent () {
                 IO::readCheckpointFile(params.restart_chkfile, pc, disease_stats, nullptr, &(urbanPopData.geoid_mf),
                                        &(urbanPopData.community_mf), cur_time, start_day);
             }
+            auto t_checkpoint_end = std::chrono::high_resolution_clock::now();
+            reportTiming("init_from_checkpoint", t_checkpoint_start, t_checkpoint_end);
         }
     }
 
     // if we are doing a restart, we need to fix up the output_file
     if (params.restart_chkfile != "") {
+        auto t_fix_output_start = std::chrono::high_resolution_clock::now();
         for (int d = 0; d < params.num_diseases; d++) {
             if (ParallelDescriptor::IOProcessor()) {
 
@@ -340,8 +385,11 @@ void runAgent () {
                 if (!outFile.good()) { amrex::Abort("problem writing output file"); }
             }
         }
+        auto t_fix_output_end = std::chrono::high_resolution_clock::now();
+        reportTiming("fix_output_files", t_fix_output_start, t_fix_output_end);
     }
 
+    auto t_init_peaks_start = std::chrono::high_resolution_clock::now();
     std::vector<int> step_of_peak(params.num_diseases, 0);
     std::vector<Long> num_infected_peak(params.num_diseases, 0);
     std::vector<Long> cumulative_deaths(params.num_diseases, 0);
@@ -358,6 +406,9 @@ void runAgent () {
     Vector<Long> num_infected(params.num_diseases, 0);
 
     amrex::ParmParse::QueryUnusedInputs();
+    auto t_init_peaks_end = std::chrono::high_resolution_clock::now();
+    reportTiming("init_peaks", t_init_peaks_start, t_init_peaks_end);
+
     date startdate(params.startdate);
     if (params.startdate.size()) {
         if (ParallelDescriptor::IOProcessor()) {
@@ -369,6 +420,7 @@ void runAgent () {
     int firstWeatherWeekIndex = -1;
     int daysToWeatherWeekend = -1;
     if (params.weather_int > 0) {
+        auto t_weather_extract_start = std::chrono::high_resolution_clock::now();
         wd.computeIndex(startdate, weatherWeekIndex, daysToWeatherWeekend);
         if (weatherWeekIndex >= 0) {
             firstWeatherWeekIndex = weatherWeekIndex;
@@ -379,8 +431,14 @@ void runAgent () {
             wd.extractActiveData(censusData.demo, weatherWeekIndex, params.nsteps / 7 + 1);
             pc.initializeWeatherIndex(censusData.unit_mf, &wd.activeWeather);
         }
+        auto t_weather_extract_end = std::chrono::high_resolution_clock::now();
+        reportTiming("extract_weather_data", t_weather_extract_start, t_weather_extract_end);
     }
 
+    auto stop_setup = std::chrono::high_resolution_clock::now();
+    reportTiming("SETUP", start_setup, stop_setup);
+
+    auto start_sim = std::chrono::high_resolution_clock::now();
     {
         BL_PROFILE_REGION("Evolution");
         for (int i = start_day; i < params.nsteps; ++i) {
@@ -559,7 +617,7 @@ void runAgent () {
 
             std::chrono::duration<double> elapsed_time = std::chrono::high_resolution_clock::now() - start_time;
 
-            Print() << "[Day " << cur_time << " " << std::fixed << std::setprecision(1) << elapsed_time.count()
+            Print() << "[Day " << cur_time << " " << std::fixed << std::setprecision(2) << elapsed_time.count()
                     << "s] infected: ";
             for (int d = 0; d < params.num_diseases; d++) {
                 if (d > 0) { Print() << ", "; }
@@ -571,9 +629,16 @@ void runAgent () {
             cur_time += 1.0_rt; // time step is one day
 
             // early exit if no more spreading or deaths can occur
-            if (num_infected[0] == 0) { break; }
+            if (num_infected[0] == 0) {
+              Print() << "EARLY-EXIT: day=" << cur_time <<
+                         " num_infected=0" << std::endl;
+              break;
+            }
         }
     }
+
+    auto stop_sim = std::chrono::high_resolution_clock::now();
+    reportTiming("SIM", start_sim, stop_sim);
 
     if (params.num_diseases == 1) {
         amrex::Print() << "\n \n";
@@ -622,3 +687,6 @@ void runAgent () {
         }
     }
 }
+
+// Local Variables:
+// 

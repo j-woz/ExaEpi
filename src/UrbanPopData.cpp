@@ -21,6 +21,7 @@
 #include <AMReX_iMultiFab.H>
 
 #include "AgentContainer.H"
+#include "TimingUtils.H"
 #include "UrbanPopData.H"
 
 using namespace amrex;
@@ -319,6 +320,8 @@ static int get_max_nborhood (int nborhood_size, int community_size) {
 void UrbanPopData::initAgents (AgentContainer& pc, const ExaEpi::TestParams& params) {
     BL_PROFILE("UrbanPopData::initAgents");
 
+    auto start_init1 = std::chrono::high_resolution_clock::now();
+    
     int myproc = ParallelDescriptor::MyProc();
     auto dx = pc.ParticleGeom(0).CellSizeArray();
 
@@ -333,7 +336,17 @@ void UrbanPopData::initAgents (AgentContainer& pc, const ExaEpi::TestParams& par
     int num_nborhoods = 0;
 
     if (!urbanpop_file) { Abort("File " + params.urbanpop_filename + " is not open\n"); }
+    int count = -1;
+    auto start_loop = std::chrono::high_resolution_clock::now();
     for (MFIter mfi = pc.MakeMFIter(0); mfi.isValid(); ++mfi) {
+        count++;
+        auto end_loop = std::chrono::high_resolution_clock::now();
+        if (count > 0)
+          reportTiming("initAgents loop", start_loop, end_loop);
+        start_loop = std::chrono::high_resolution_clock::now();
+
+        auto start_intro = std::chrono::high_resolution_clock::now();
+        
         Vector<UrbanPopAgent> agents;
         Vector<AgentExtras> agents_extras;
 
@@ -366,19 +379,24 @@ void UrbanPopData::initAgents (AgentContainer& pc, const ExaEpi::TestParams& par
                 }
             }
         }
-
         if (num_communities == 0) { continue; }
 
         auto& ptile = pc.DefineAndReturnParticleTile(0, mfi);
         ptile.resize(agents.size());
         auto aos = &ptile.GetArrayOfStructs()[0];
 
+        auto end_intro = std::chrono::high_resolution_clock::now();
+        reportTiming("intro", start_intro, end_intro);
+        
+        auto start_cp = std::chrono::high_resolution_clock::now();
         Gpu::DeviceVector<UrbanPopAgent> agents_d;
         Gpu::DeviceVector<AgentExtras> agents_extras_d;
         copyToDeviceAsync(agents, agents_d);
         copyToDeviceAsync(agents_extras, agents_extras_d);
         Gpu::streamSynchronize();
-
+        auto stop_cp = std::chrono::high_resolution_clock::now();
+        reportTiming("GPU-CP", start_intro, stop_cp);
+        
         auto agents_ptr = agents_d.data();
         auto agents_extras_ptr = agents_extras_d.data();
 
@@ -501,6 +519,9 @@ void UrbanPopData::initAgents (AgentContainer& pc, const ExaEpi::TestParams& par
         });
         Gpu::synchronize();
 
+        auto end_sync1 = std::chrono::high_resolution_clock::now();
+        reportTiming("sync1", start_intro, end_sync1);
+
         // now ensure that all members of the same family have the same home nborhood
         // and ensure all members of the same hh cluster have the same home neighborhood
         ParallelFor(np, [=] AMREX_GPU_DEVICE (int i) noexcept {
@@ -520,6 +541,8 @@ void UrbanPopData::initAgents (AgentContainer& pc, const ExaEpi::TestParams& par
             nborhood_ptr[i] = nborhood;
         });
         Gpu::synchronize();
+        auto end_sync2 = std::chrono::high_resolution_clock::now();
+        reportTiming("sync2", start_intro, end_sync2);
     }
 
     urbanpop_file.close();
